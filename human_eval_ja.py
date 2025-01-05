@@ -9,9 +9,10 @@ from tqdm import tqdm
 from openai import OpenAI
 
 from java_runner import java_compile_and_run
+from cpp_runner import cpp_compile_and_run
 
 
-class HumanEvalJava:
+class HumanEvalTask:
     def __init__(self, name: str, language: str, prompt: str, doctests: str, original: str,
                  prompt_terminology: str, tests: str, stop_tokens: list, task_id: str, test: str):
         self.name = name
@@ -40,12 +41,12 @@ class HumanEvalJava:
         }
 
     @classmethod
-    def from_json(cls, file_path: str) -> list['HumanEvalJava']:
+    def from_json(cls, file_path: str) -> list['HumanEvalTask']:
         tasks = []
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 data = json.loads(line)
-                task = HumanEvalJava(
+                task = HumanEvalTask(
                     name=data['name'],
                     language=data['language'],
                     prompt=data['prompt'],
@@ -61,7 +62,7 @@ class HumanEvalJava:
         return tasks
 
     @classmethod
-    def save_json(cls, tasks: list['HumanEvalJava'], file_path: str):
+    def save_json(cls, tasks: list['HumanEvalTask'], file_path: str):
         with open(file_path, 'w', encoding='utf-8') as f:
             for task in tasks:
                 f.write(json.dumps(task.to_dict()) + "\n")
@@ -77,14 +78,41 @@ class HumanEvalJava:
                 return True
         return False
 
+    def get_function_name(self):
+        func_lines = [x for x in self.prompt.strip().split('\n') if x.strip()]
+
+        if self.language.lower() == 'python':
+            func_idx = [i for i in range(len(func_lines)) if func_lines[i].startswith("def ")][-1]
+            func_name = func_lines[func_idx].split('(')[0].strip()
+            func_prefix = "\n".join(func_lines[:func_idx])
+            return func_name, func_prefix
+
+        func_name = func_lines[-1].split('{')[0].strip()
+        func_prefix = "\n".join(func_lines[:-1])
+        return func_name, func_prefix
+
     def eval_code(self, generation: str) -> str:
         try:
             code_block: str = re.findall(f'```{self.language.lower()}\n(.*?)```', generation, re.DOTALL | re.IGNORECASE)[0]
-            code_block = code_block[::-1].replace('}', '', 2)[::-1]
+
+            # Remove main and last "}"
+            if self.language == 'java':
+                main_func = "public static void main"
+                last_count = 2
+            elif self.language == 'cpp':
+                main_func = "int main"
+                last_count = 1
+            escaped_signature = re.escape(main_func)
+            pattern = rf'{escaped_signature}\s*\([^)]*\)\s*\{{(?:[^{{}}]*|\{{[^{{}}]*\}})*\}}'
+            code_block = re.sub(pattern, '', code_block, flags=re.DOTALL)
+
+            code_block = code_block[::-1].replace('}', '', last_count)[::-1]
             lines = code_block.splitlines()
             cleaned_lines = [line for line in lines if line.strip()]
             return "\n".join(cleaned_lines) + '\n' + self.test
-        except Exception:
+
+        except Exception as e:
+            print(e)
             return "failed: parse error"
 
 
@@ -97,22 +125,32 @@ model = 'dummy'
 
 
 def build_deepseekcoder_instruction_ja(question: str, languge='java'):
-    return '''
-関数を完成させてください。与えられたコードを修正することは許されません。完成した関数はコードブロックにまとめて返してください。以下は完成させるためのコードです：
+    if languge == 'java':
+        return '''
+関数を完成させてください。与えられたコードを修正することは許されません。完成した関数はコードブロックにまとめて返してください。与えられたコードを含めて返却してください。以下は完成させるためのコードです：
 ```{}
 {}
 ```
 '''.strip().format(languge.lower(), question.strip())
+    elif languge == 'cpp':
+        return '''
+関数を完成させてください。与えられたコードを修正することは許されません。ただし不足するinclude文は追加してください。完成した関数はコードブロックにまとめて返してください。与えられたコードを含めて返却してください。以下は完成させるためのコードです：
+```{}
+{}
+```
+'''.strip().format(languge.lower(), question.strip())
+    else:
+        raise ValueError('not supported languge: {}'.format(languge))
 
 
-def code_complete(incomplete_codes: list[str]):
+def code_complete(incomplete_codes: list[str], languge='java'):
     results = []
     for incomplete_code in tqdm(incomplete_codes, desc='generating'):
         response = client.chat.completions.create(
             messages=[
                 {
                     "role": "user",
-                    "content": build_deepseekcoder_instruction_ja(incomplete_code)
+                    "content": build_deepseekcoder_instruction_ja(incomplete_code, languge)
                 }
             ],
             model=model,
@@ -124,24 +162,51 @@ def code_complete(incomplete_codes: list[str]):
 
 
 def evaluate(file_path='data/humaneval-java_ja.jsonl', temp_path='./tmp', sampling=-1):
-    tasks = HumanEvalJava.from_json(file_path)[:sampling]
+    tasks = HumanEvalTask.from_json(file_path)[:sampling]
     prompts = [t.prompt for t in tasks]
-    generations = code_complete(prompts)
+    language = tasks[0].language
+    generations = code_complete(prompts, language)
     build_targets = [t.eval_code(g) for [t, g] in zip(tasks, generations)]
     results = []
     for [t, b] in tqdm(zip(tasks, build_targets), desc='compile and run'):
         if b.startswith('failed'):
             results.append(b)
             continue
-        results.append(
-            java_compile_and_run(java_code=b, temp_dir=os.path.join(temp_path, t.name)))
+        if language == 'java':
+            results.append(
+                java_compile_and_run(java_code=b, temp_dir=os.path.join(temp_path, t.name)))
+        elif language == 'cpp':
+            # 不足するincludeを動的に補う（元コード踏襲。ここで評価しないなら最初からつけていいかも）
+            cpp_includes = [
+                "#include<stdlib.h>",
+                "#include<algorithm>",
+                "#include<math.h>",
+                "#include<stdio.h>",
+                "#include<vector>",
+                "#include<string>",
+                "#include<climits>",
+                "#include<cstring>",
+                "#include<iostream>",
+                "#include<cassert>"
+            ]
+            test_set_up = ''
+            for s in cpp_includes:
+                if s not in b:
+                    test_set_up += s + "\n"
+            test_string = test_set_up + "\n" + b
+            use_ssl = False
+            if t.task_id == 162:
+                # コンパイル都合
+                use_ssl = True
+            results.append(
+                cpp_compile_and_run(cpp_code=test_string, temp_dir=os.path.join(temp_path, t.name), use_ssl=use_ssl))
     return results, tasks
 
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="HumanEval Java(ja)")
-    parser.add_argument('--file_path', type=str, default='data/humaneval-java_ja.jsonl')
+    parser = argparse.ArgumentParser(description="HumanEval java or cpp (ja)")
+    parser.add_argument('--file_path', type=str, default='data/humaneval-cpp_ja.jsonl')
     parser.add_argument('--temp_dir', type=str, default='./tmp')
     parser.add_argument('--sampling', type=int, default=-1)
     parser.add_argument('--show', action='store_true')
