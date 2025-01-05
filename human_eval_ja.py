@@ -112,7 +112,6 @@ class HumanEvalTask:
             return "\n".join(cleaned_lines) + '\n' + self.test
 
         except Exception as e:
-            print(e)
             return "failed: parse error"
 
 

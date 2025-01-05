@@ -35,7 +35,6 @@ def cpp_compile_and_run(cpp_code, temp_dir, test_file="test.cpp", timeout=60, us
         cmd = f"{gpp_exec}g++ -std=c++17 {test_file} {ssl_flag}"
         compilation_result = subprocess.run(cmd, timeout=60, capture_output=True, shell=True)
         compile_returncode = compilation_result.returncode
-        print(compilation_result)
     except subprocess.TimeoutExpired as e:
         pass
 
