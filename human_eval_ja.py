@@ -94,7 +94,6 @@ class HumanEvalTask:
     def eval_code(self, generation: str) -> str:
         try:
             code_block: str = re.findall(f'```{self.language.lower()}\n(.*?)```', generation, re.DOTALL | re.IGNORECASE)[0]
-
             # Remove main and last "}"
             if self.language == 'java':
                 main_func = "public static void main"
@@ -109,18 +108,11 @@ class HumanEvalTask:
             code_block = code_block[::-1].replace('}', '', last_count)[::-1]
             lines = code_block.splitlines()
             cleaned_lines = [line for line in lines if line.strip()]
-            return "\n".join(cleaned_lines) + '\n' + self.test
+            add_test = "\n".join(cleaned_lines) + '\n' + self.test
+            return add_test
 
         except Exception as e:
             return "failed: parse error"
-
-
-client = OpenAI(
-    base_url='http://127.0.0.1:8080/',
-    api_key=os.environ.get("OPENAI_API_KEY", "empty"),
-)
-
-model = 'dummy'
 
 
 def build_deepseekcoder_instruction_ja(question: str, languge='java'):
@@ -142,7 +134,9 @@ def build_deepseekcoder_instruction_ja(question: str, languge='java'):
         raise ValueError('not supported languge: {}'.format(languge))
 
 
-def code_complete(incomplete_codes: list[str], languge='java'):
+def code_complete(
+    incomplete_codes: list[str],
+    client, model_name='dummy',  languge='java'):
     results = []
     for incomplete_code in tqdm(incomplete_codes, desc='generating'):
         response = client.chat.completions.create(
@@ -152,7 +146,7 @@ def code_complete(incomplete_codes: list[str], languge='java'):
                     "content": build_deepseekcoder_instruction_ja(incomplete_code, languge)
                 }
             ],
-            model=model,
+            model=model_name,
         )
         results.append(
             response.choices[0].message.content
@@ -160,11 +154,16 @@ def code_complete(incomplete_codes: list[str], languge='java'):
     return results
 
 
-def evaluate(file_path='data/humaneval-java_ja.jsonl', temp_path='./tmp', sampling=-1):
-    tasks = HumanEvalTask.from_json(file_path)[:sampling]
+def evaluate(
+    client, model_name='dummy', file_path='data/humaneval-java_ja.jsonl', temp_path='./tmp', sampling=-1):
+    tasks = HumanEvalTask.from_json(file_path)
+    if sampling > 0:
+        tasks = tasks[:sampling]
     prompts = [t.prompt for t in tasks]
     language = tasks[0].language
-    generations = code_complete(prompts, language)
+    generations = code_complete(
+        incomplete_codes=prompts,
+        client=client, model_name=model_name, languge=language)
     build_targets = [t.eval_code(g) for [t, g] in zip(tasks, generations)]
     results = []
     for [t, b] in tqdm(zip(tasks, build_targets), desc='compile and run'):
@@ -207,10 +206,19 @@ def main():
     parser = argparse.ArgumentParser(description="HumanEval java or cpp (ja)")
     parser.add_argument('--file_path', type=str, default='data/humaneval-cpp_ja.jsonl')
     parser.add_argument('--temp_dir', type=str, default='./tmp')
+    parser.add_argument('--base_url', type=str, default='http://127.0.0.1:11434/v1')
+    parser.add_argument('--model_name', type=str, default='qwen2.5-coder:1.5b')
     parser.add_argument('--sampling', type=int, default=-1)
     parser.add_argument('--show', action='store_true')
     args = parser.parse_args()
-    results, tasks = evaluate(file_path=args.file_path, temp_path=args.temp_dir, sampling=args.sampling)
+
+    client = OpenAI(
+        base_url=args.base_url,
+        api_key=os.environ.get("OPENAI_API_KEY", "empty"),
+    )
+    results, tasks = evaluate(
+        client, args.model_name,
+        file_path=args.file_path, temp_path=args.temp_dir, sampling=args.sampling)
     passed = 0
     for r in results:
         if r == 'passed':
