@@ -102,9 +102,8 @@ class HumanEvalTask:
                 main_func = "int main"
                 last_count = 1
             escaped_signature = re.escape(main_func)
-            pattern = rf'{escaped_signature}\s*\([^)]*\)\s*\{{(?:[^{{}}]*|\{{[^{{}}]*\}})*\}}'
+            pattern = rf'{escaped_signature}\s*\([^)]*\)\s*\{{(?:[^{{}}]+|\{{[^{{}}]*\}})*\}}'
             code_block = re.sub(pattern, '', code_block, flags=re.DOTALL)
-
             code_block = code_block[::-1].replace('}', '', last_count)[::-1]
             lines = code_block.splitlines()
             cleaned_lines = [line for line in lines if line.strip()]
